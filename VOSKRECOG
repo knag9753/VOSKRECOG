@@ -1,0 +1,579 @@
+import os
+import pyaudio
+import json
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
+import threading
+import pyttsx3
+import requests
+from vosk import Model, KaldiRecognizer
+from word2number import w2n
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+class VoiceAssistantApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Merck Voice Assistant")
+        self.root.attributes("-fullscreen", True)
+        self.root.configure(bg="#ffffff")
+
+        self.style = ttk.Style()
+        self.style.configure("TButton", font=("Helvetica", 24, "bold"), padding=20, background="#00a3e0",
+                             foreground="black")
+        self.style.map("TButton", background=[('active', '#0072b5'), ('!disabled', '#00a3e0')],
+                       foreground=[('active', 'black'), ('!disabled', 'black')])
+        self.style.configure("TLabel", font=("Helvetica", 20), background="#ffffff", foreground="#0072b5")
+
+        self.frame = tk.Frame(root, bg="#ffffff", highlightbackground="#008e5b", highlightthickness=4, padx=40, pady=40)
+        self.frame.pack(expand=True, padx=40, pady=40)
+
+        # Merck logo
+        self.logo_image = Image.open("merck_logo.png")
+        self.logo_image = self.logo_image.resize((300, 100), Image.LANCZOS)
+        self.logo_photo = ImageTk.PhotoImage(self.logo_image)
+        self.logo_label = tk.Label(self.frame, image=self.logo_photo, bg="#ffffff")
+        self.logo_label.pack(pady=30)
+
+        self.email_label = tk.Label(self.frame, text="Please enter your email:", wraplength=1000, justify="center",
+                                    bg="#ffffff",
+                                    fg="#0072b5", font=("Helvetica", 20))
+        self.email_label.pack(pady=30)
+
+        self.email_entry = tk.Entry(self.frame, font=("Helvetica", 20), width=30, bd=2, relief="solid", bg="#ffffff",
+                                    highlightbackground="#0072b5", highlightthickness=2)
+        self.email_entry.pack(pady=10)
+        self.email_entry.bind("<Return>", lambda event: self.submit_email())  # Bind the "Enter" key to submit_email
+
+        self.email_button = ttk.Button(self.frame, text="Submit", command=self.submit_email, state=tk.NORMAL)
+        self.email_button.pack(pady=20)
+
+        self.progress = ttk.Progressbar(self.frame, orient="horizontal", length=500, mode="indeterminate")
+
+        self.new_prompt_button = ttk.Button(self.frame, text="New Prompt", command=self.start_listening,
+                                            state=tk.DISABLED)
+
+        self.status_label = tk.Label(self.frame, text="", wraplength=1000, justify="center", bg="#ffffff",
+                                     fg="#0072b5", font=("Helvetica", 20))
+        self.status_label.pack(pady=30)
+
+        self.listening = False
+        self.model_loaded = False
+        self.recording = False
+        self.transcription_file = "transcription.txt"
+
+        self.checklist = [
+            ("Raw materials were used within expiry or use by or re-evaluation or recertification date.", "boolean"),
+            ("Training was complete as per batch records or process requirements.", "boolean"),
+            ("No major changes to batch record without quality approval.", "boolean"),
+            ("Batch has been manufactured following cGMPs and all batch documentation has been reviewed.", "boolean"),
+            ("AQL passed, if performed during manufacturing.", "boolean"),
+            ("Deviations or NOEs?", "boolean"),
+            ("Are all raw materials fully released?", "boolean"),
+            ("The date of manufacture is recorded on the cover page of the batch record.", "boolean"),
+            (
+            "Confirmed identification of major equipment and asset numbers. Verified all fields are filled in as appropriate and equipment was used within its qualified parameters.",
+            "boolean"),
+            ("All scales and balances IDs and calibration statuses are recorded.", "boolean"),
+            (
+            "Manufacturing Procedures: confirmed start and stop times, processing times are chronologically correct within established time limits as applicable, and the performed by/ checked by / verified by fields are complete.",
+            "boolean"),
+            ("All in-processes measurements met specified setpoints or ranges.", "boolean"),
+            ("Environmental data meets the specified limits (if applicable).", "boolean"),
+            (
+            "Personnel / Signature Log. All Personnel involved in batch manufacture or review are listed on the signature log.",
+            "boolean"),
+            (
+            "All deviations, planned deviations, change controls, and risk use for the batch were identified and documented. All material and batch numbers are listed.",
+            "boolean"),
+            ("There are no blank data entry spaces as per Sop-20688.", "boolean"),
+            (
+            "Any units delivered to inventory in the batch record agrees with the amount entered during Goods Receipt.",
+            "boolean"),
+            (
+            "Label information corresponds to information in the batch record. All label reconciliations are complete as per SOP 958-1039 applicable forms.",
+            "boolean"),
+            (
+            "Calculations performed and verified or checked by two different individuals, except data generated by a validated system (one signature required).",
+            "boolean")
+        ]
+
+        self.conditional_questions = {
+            6: [("If No, list materials that are not fully released.", "text"),
+                (
+                "For risk used batches/materials which are imported to the US only, notifications of the FDA release received.",
+                "text")],
+            5: [("If Yes, Batch Impact? PR# 70522 90635 and 90647.", "text")]
+        }
+
+        self.checklist_index = 0
+        self.responses = []
+
+        self.user_email = None
+
+        # Begin text-to-speech engine
+        self.engine = pyttsx3.init()
+        self.set_voice()
+        self.set_speech_rate(200)  # Adjust the rate to make it sound more natural
+        self.set_volume(1.0)  # Set volume to the maximum
+
+    def set_voice(self):
+        voice_id = "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_EN-US_ZIRA_11.0"
+        self.engine.setProperty('voice', voice_id)
+
+    def set_speech_rate(self, rate):
+        self.engine.setProperty('rate', rate)
+
+    def set_volume(self, volume):
+        self.engine.setProperty('volume', volume)
+
+    def speak(self, text):
+        self.engine.say(text)
+        self.engine.runAndWait()
+
+    def submit_email(self):
+        self.user_email = self.email_entry.get()
+        if self.user_email:
+            self.email_label.pack_forget()
+            self.email_entry.pack_forget()
+            self.email_button.pack_forget()
+            self.status_label.config(text="User email registered. Loading model, please wait...", foreground="#0072b5")
+            self.speak("User email registered. Loading model, please wait.")
+            self.progress.pack(pady=30)
+            self.progress.start()
+            self.thread = threading.Thread(target=self.init_model)
+            self.thread.start()
+        else:
+            self.status_label.config(text="Please enter a valid email address.", foreground="red")
+            self.speak("Please enter a valid email address.")
+
+    def init_model(self):
+        model_path = r"C:\Users\nagpakab\OneDrive - Merck Sharp & Dohme LLC\Documents\vosk-model-en-us-0.42-gigaspeech"
+        if not os.path.exists(model_path):
+            self.status_label.config(text="Model directory not found. Please check the path.", foreground="red")
+            self.speak("Model directory not found. Please check the path.")
+            self.progress.stop()
+            return
+
+        self.model = Model(model_path)
+        self.rec = KaldiRecognizer(self.model, 16000)
+
+        self.p = pyaudio.PyAudio()
+
+        self.model_loaded = True
+        self.status_label.config(text="Model loaded. Click 'New Prompt' to start.", foreground="#0072b5")
+        self.speak("Model loaded. Click New Prompt to start.")
+        self.progress.stop()
+        self.progress.pack_forget()
+        self.new_prompt_button.pack(pady=30)
+        self.new_prompt_button.config(state=tk.NORMAL)
+
+    def open_stream(self):
+        if hasattr(self, 'stream') and not self.stream.is_active():
+            self.close_stream()
+        self.stream = self.p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=4096)
+        self.stream.start_stream()
+
+    def close_stream(self):
+        if hasattr(self, 'stream'):  # Check if the stream attribute exists
+            if not self.stream.is_stopped():
+                self.stream.stop_stream()
+            if self.stream.is_active():
+                self.stream.close()
+
+    def start_listening(self):
+        if not self.model_loaded:
+            return
+
+        self.status_label.config(text="Listening for commands...", foreground="#0072b5")
+        self.speak("Listening for commands")
+        self.new_prompt_button.config(state=tk.DISABLED)
+
+        self.open_stream()
+
+        self.thread = threading.Thread(target=self.listen)
+        self.thread.start()
+
+    def start_checklist(self):
+        self.checklist_index = 0
+        self.responses = []
+        self.status_label.config(text="Initializing Operations Checklist...", foreground="#0072b5")
+        self.speak("Initializing Operations Checklist")
+        # Initializes or clears the file at the start
+        with open("checklist_responses.txt", "w") as f:
+            f.write("")
+        self.ask_next_checklist_item()
+
+    def ask_next_checklist_item(self):
+        if self.checklist_index < len(self.checklist):
+            question, response_type = self.checklist[self.checklist_index]
+            self.status_label.config(text=question, foreground="#0072b5")
+            self.speak(question)
+            self.thread = threading.Thread(target=self.listen_for_response, args=(response_type,))
+            self.thread.start()
+        else:
+            self.save_responses()
+            self.reset_to_listening_state()
+
+    def listen_for_response(self, response_type):
+        try:
+            self.open_stream()  # Ensure the stream is open
+            while True:
+                data = self.stream.read(4096, exception_on_overflow=False)
+                if self.rec.AcceptWaveform(data):
+                    results = json.loads(self.rec.Result())
+                    text = results.get('text', '').lower()
+
+                    if text in ['exit', 'quit']:
+                        self.status_label.config(text="Exiting checklist...", foreground="#0072b5")
+                        self.speak("Exiting checklist")
+                        self.reset_to_listening_state()
+                        return
+
+                    if response_type == "boolean":
+                        if text in ['yes', 'yeah', 'ya', 'no', 'nah', 'nope']:
+                            text = self.post_process_text(text)  # Post-process text
+                            self.responses.append((self.checklist[self.checklist_index][0], text))
+                            self.save_response_to_file(self.checklist[self.checklist_index][0],
+                                                       text)  # Save response to file
+
+                            # Handle conditionals based on responses
+                            if text in ['yes', 'yeah', 'ya']:
+                                if self.checklist_index == 5:  # Deviations/NOEs?
+                                    self.checklist[self.checklist_index + 1:self.checklist_index + 1] = self.conditional_questions[5]
+                            elif text in ['no', 'nah', 'nope']:
+                                if self.checklist_index == 6:  # Are all raw materials fully released?
+                                    self.checklist[self.checklist_index + 1:self.checklist_index + 1] = self.conditional_questions[6]
+
+                            self.checklist_index += 1
+                            self.close_stream()  # Close stream before asking the next item
+                            self.ask_next_checklist_item()
+                            return  # Exit listening loop
+
+                    elif response_type == "text":
+                        if text:
+                            text = self.post_process_text(text)  # Post-process text
+                            self.responses.append((self.checklist[self.checklist_index][0], text))
+                            self.save_response_to_file(self.checklist[self.checklist_index][0],
+                                                       text)  # Save response to file
+                            self.checklist_index += 1
+                            self.close_stream()  # Close stream before asking the next item
+                            self.ask_next_checklist_item()
+                            return  # Exit listening loop
+
+        except Exception as e:
+            self.status_label.config(text=f"Error: {str(e)}", foreground="red")
+            self.speak(f"Error: {str(e)}")
+        finally:
+            self.close_stream()
+
+    def post_process_text(self, text):
+        # Mapping of single-digit words to their respective digits
+        digit_map = {
+            "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9"
+        }
+
+        words = text.lower().split()
+        digits_sequence = []
+        numeric_string = ""
+
+        # Check if all words are in the digit_map
+        if all(word in digit_map for word in words):
+            # If all words are single digits, concatenate them
+            for word in words:
+                numeric_string += digit_map[word]
+            return numeric_string
+        else:
+            # If there are words not in the digit_map or it's a more complex numeric phrase
+            try:
+                # Attempt to convert the full phrase to a number
+                return str(w2n.word_to_num(text))
+            except ValueError:
+                # Handle the case where conversion is not possible
+                processed_text = []
+                for word in words:
+                    if word in digit_map:
+                        processed_text.append(digit_map[word])
+                    else:
+                        # For non-digit words, append them directly
+                        processed_text.append(word)
+                return ' '.join(processed_text)
+
+    def save_response_to_file(self, item, response):
+        with open("checklist_responses.txt", "a") as f:
+            f.write(f"{item}: {response}\n")
+
+    def save_responses(self):
+        with open("checklist_responses.txt", "w") as f:
+            for item, response in self.responses:
+                f.write(f"{item}: {response}\n")
+        self.status_label.config(text="Operations Checklist completed and saved.", foreground="#0072b5")
+        self.speak("Operations Checklist completed and saved")
+        self.reset_to_listening_state()  # Reset to listening state after saving responses
+
+    def start_transcription(self):
+        self.recording = True
+        self.status_label.config(text="Transcription started. Speak your message.", foreground="#0072b5")
+        self.speak("Transcription started. Speak your message.")
+        # Initializes or clears the transcription file at the start
+        with open(self.transcription_file, "w") as f:
+            f.write("")
+        self.thread = threading.Thread(target=self.transcribe)
+        self.thread.start()
+
+    def stop_transcription(self):
+        self.recording = False
+        self.status_label.config(text="Transcription stopped and saved.", foreground="#0072b5")
+        self.speak("Transcription stopped and saved.")
+        self.reset_to_listening_state()
+
+    def transcribe(self):
+        try:
+            self.open_stream()  # Ensure the stream is open
+            while self.recording:
+                data = self.stream.read(4096, exception_on_overflow=False)
+                if self.rec.AcceptWaveform(data):
+                    results = json.loads(self.rec.Result())
+                    text = results.get('text', '').lower()
+                    if any(phrase in text for phrase in [
+                        "stop recording",
+                        "stop transcription",
+                        "end recording",
+                        "end transcription"
+                    ]):
+                        self.stop_transcription()
+                        break  # Exit the while loop
+                    with open(self.transcription_file, "a") as f:
+                        f.write(text + "\n")
+        except Exception as e:
+            self.status_label.config(text=f"Error: {str(e)}", foreground="red")
+            self.speak(f"Error: {str(e)}")
+        finally:
+            self.close_stream()
+
+    def listen(self):
+        try:
+            self.open_stream()  # Ensure the stream is open
+            while True:
+                data = self.stream.read(4096, exception_on_overflow=False)
+                if self.rec.AcceptWaveform(data):
+                    results = json.loads(self.rec.Result())
+                    text = results.get('text', '').lower()
+
+                    if any(wake_word in text for wake_word in ["hey flex", "hey fleks", "hey flax", "hey fecks"]):
+                        self.status_label.config(text=f"Recognized command: {text}", foreground="#008e5b")
+                        print(f"Recognized command: {text}")
+                        command_text = text.split("hey flex", 1)[-1].strip()
+                        command_text = self.post_process_text(command_text)
+
+                        if any(phrase in command_text for phrase in [
+                            "initiate operations checklist",
+                            "initiates operations checklist",
+                            "start operations checklist",
+                            "initialize operations checklist",
+                            "begin operations checklist",
+                            "initiated operations checklist",
+                            "initiated operation checklist",
+                            "can you start the operations checklist",
+                            "initiate operation checklist",
+                            "initialized operation checklist",
+                            "initiated operation checklist",
+                            "initialized operations checklist",
+                            "please start the operations checklist"
+                            "commence operations checklist"
+                        ]):
+                            self.status_label.config(text="Initializing Operations Checklist...", foreground="#0072b5")
+                            self.speak("Initializing Operations Checklist")
+                            self.start_checklist()
+                            self.close_stream()  # Close the stream after processing command
+                            return  # Exit the listening loop
+                        elif "weather" in command_text:
+                            self.status_label.config(text="Fetching weather information...", foreground="#0072b5")
+                            self.get_weather()
+                            self.close_stream()  # Close the stream after processing command
+                            return  # Exit the listening loop
+                        elif any(phrase in command_text for phrase in [
+                            "send my operations checklist",
+                            "email my operations checklist",
+                            "send the operations checklist",
+                            "email the operations checklist",
+                            "send operations checklist",
+                            "email operations checklist",
+                            "can you send my operations checklist",
+                            "can you email my operations checklist"
+                        ]):
+                            self.status_label.config(text="Sending checklist via email...", foreground="#0072b5")
+                            self.speak("Sending checklist via email")
+                            self.send_email()
+                            self.close_stream()
+                            return
+                        elif any(phrase in command_text for phrase in [
+                            "start recording",
+                            "begin recording",
+                            "start transcription",
+                            "begin transcription"
+                        ]):
+                            self.start_transcription()
+                            self.close_stream()
+                            return
+                        elif any(phrase in command_text for phrase in [
+                            "stop recording",
+                            "stop transcription",
+                            "end recording",
+                            "end transcription"
+                        ]):
+                            self.stop_transcription()
+                            self.close_stream()
+                            return
+                        elif any(phrase in command_text for phrase in [
+                            "send my recording",
+                            "email my recording",
+                            "send the recording",
+                            "email the recording",
+                            "send transcription",
+                            "send my transcription",
+                            "email transcription",
+                            "email my transcription",
+                            "can you send the recording",
+                            "can you send the transcription",
+                            "can you send my recording",
+                            "can you send my transcription",
+                            "can you send recording",
+                            "can you send transcription"
+                        ]):
+                            self.status_label.config(text="Sending transcription via email...", foreground="#0072b5")
+                            self.speak("Sending transcription via email")
+                            self.send_email_transcription()
+                            self.close_stream()
+                            return
+                        else:
+                            self.status_label.config(text=f"Command: {command_text}", foreground="#0072b5")
+                            self.speak(f"You said: {command_text}")
+                            self.new_prompt_button.config(state=tk.NORMAL)
+                            self.close_stream()  # Close the stream after processing command
+                            return  # Exit the listening loop
+
+        except Exception as e:
+            self.status_label.config(text=f"Error: {str(e)}", foreground="red")
+            self.speak(f"Error: {str(e)}")
+        finally:
+            self.close_stream()
+
+    def get_weather(self):
+        url = "https://api.open-meteo.com/v1/forecast?latitude=40.611375&longitude=-74.268305&current=temperature_2m,relative_humidity_2m,precipitation,rain,showers,snowfall,wind_speed_10m,wind_direction_10m,wind_gusts_10m&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=America%2FNew_York&forecast_days=1"
+
+        try:
+            response = requests.get(url, verify=False)  # Disable SSL verification
+            response.raise_for_status()
+            weather_data = response.json()
+
+            # Extract relevant weather information
+            current_temp = weather_data['current']['temperature_2m']
+            chance_of_rain = weather_data['current']['rain']  # Assuming this represents the chance of rain
+            wind_speed = weather_data['current']['wind_speed_10m']
+
+            self.status_label.config(
+                text=f"Current Temperature: {current_temp}°F\nChance of Rain: {chance_of_rain} inches\nWind Speed: {wind_speed} mph",
+                foreground="#0072b5")
+            self.speak(f"The current temperature is {current_temp} degrees Fahrenheit. The expected amount of rain is {chance_of_rain} inches. The wind speed is {wind_speed} miles per hour.")
+
+            self.new_prompt_button.config(state=tk.NORMAL)  # Re-enable the button after announcing the weather
+
+        except requests.exceptions.RequestException as e:
+            self.status_label.config(text=f"Error fetching weather: {str(e)}", foreground="red")
+            self.speak(f"Error fetching weather: {str(e)}")
+            self.new_prompt_button.config(state=tk.NORMAL)  # Re-enable the button if there is an error
+
+    def send_email(self):
+        if not self.user_email:
+            self.status_label.config(text="User email not found. Please restart the application.", foreground="red")
+            self.speak("User email not found. Please restart the application.")
+            return
+
+        msg = MIMEMultipart()
+        msg['From'] = 'usryssnmr@merck.com'
+        msg['To'] = self.user_email
+        msg['Subject'] = "Operations Checklist"
+
+        body = "Please find the attached checklist responses."
+        msg.attach(MIMEText(body, 'plain'))
+
+        filename = "checklist_responses.txt"
+        attachment = open(filename, "rb")
+
+        part = MIMEBase('application', 'octet-stream')
+        part.set_payload(attachment.read())
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', f"attachment; filename= {filename}")
+
+        msg.attach(part)
+
+        try:
+            server = smtplib.SMTP('Mailhost.merck.com', 25)
+            server.starttls()
+            text = msg.as_string()
+            server.sendmail('usryssnmr@merck.com', self.user_email, text)
+            server.quit()
+            self.status_label.config(text="Email sent successfully!", foreground="#0072b5")
+            self.speak("Email sent successfully!")
+            self.reset_to_listening_state()  # Reset to listening state after sending email
+        except Exception as e:
+            self.status_label.config(text=f"Error sending email: {str(e)}", foreground="red")
+            self.speak(f"Error sending email: {str(e)}")
+            self.new_prompt_button.config(state=tk.NORMAL)  # Re-enable the button if there is an error
+
+    def send_email_transcription(self):
+        if not self.user_email:
+            self.status_label.config(text="User email not found. Please restart the application.", foreground="red")
+            self.speak("User email not found. Please restart the application.")
+            return
+
+        msg = MIMEMultipart()
+        msg['From'] = 'usryssnmr@merck.com'
+        msg['To'] = self.user_email
+        msg['Subject'] = "Transcription"
+
+        body = "Please find the attached transcription."
+        msg.attach(MIMEText(body, 'plain'))
+
+        filename = self.transcription_file
+        attachment = open(filename, "rb")
+
+        part = MIMEBase('application', 'octet-stream')
+        part.set_payload(attachment.read())
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', f"attachment; filename= {filename}")
+
+        msg.attach(part)
+
+        try:
+            server = smtplib.SMTP('Mailhost.merck.com', 25)
+            server.starttls()
+            text = msg.as_string()
+            server.sendmail('usryssnmr@merck.com', self.user_email, text)
+            server.quit()
+            self.status_label.config(text="Transcription email sent successfully!", foreground="#0072b5")
+            self.speak("Transcription email sent successfully!")
+            self.reset_to_listening_state()  # Reset to listening state after sending email
+        except Exception as e:
+            self.status_label.config(text=f"Error sending email: {str(e)}", foreground="red")
+            self.speak(f"Error sending email: {str(e)}")
+            self.new_prompt_button.config(state=tk.NORMAL)  # Re-enable the button if there is an error
+
+    def reset_to_listening_state(self):
+        self.status_label.config(text="Listening for commands...", foreground="#0072b5")
+        self.speak("Listening for commands")
+        self.new_prompt_button.config(state=tk.NORMAL)
+        self.thread = threading.Thread(target=self.listen)
+        self.thread.start()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = VoiceAssistantApp(root)
+    root.mainloop()
