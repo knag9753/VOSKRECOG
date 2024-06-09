@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Merck Voice Assistant</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <style>
+        body {
+            background-color: #ffffff;
+            text-align: center;
+            font-family: 'Helvetica', sans-serif;
+            color: #0072b5;
+        }
+        .container {
+            margin-top: 50px;
+        }
+        #logo {
+            width: 300px;
+            height: 100px;
+        }
+        .btn-primary {
+            background-color: #00a3e0;
+            border: none;
+            padding: 20px;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .btn-primary:hover {
+            background-color: #0072b5;
+        }
+        .progress {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <img id="logo" src="{{ url_for('static', filename='merck_logo.png') }}" alt="Merck Logo">
+        <h1 class="mt-4">Merck Voice Assistant</h1>
+        <p class="lead" id="emailPrompt">Please enter your email to get started:</p>
+        <form id="emailForm">
+            <div class="form-group">
+                <input type="email" class="form-control" id="email" placeholder="Enter your email" required>
+            </div>
+            <button type="submit" class="btn btn-primary">Submit</button>
+        </form>
+        <div id="status" class="mt-4"></div>
+        <button id="startListeningBtn" class="btn btn-primary mt-4" style="display: none;">New Prompt</button>
+        <div class="progress" style="display: none;">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%;"></div>
+        </div>
+    </div>
+    <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            $('#emailForm').on('submit', function(e) {
+                e.preventDefault();
+                var email = $('#email').val();
+                console.log('Submitting email:', email); // Log email submission for debugging
+                $.post('/submit_email', {email: email}, function(data) {
+                    console.log('Response from /submit_email:', data); // Log response for debugging
+                    $('#status').text(data.message);
+                    if (data.status === 'success') {
+                        $('#emailForm').hide();
+                        $('#emailPrompt').hide();
+                        $('.progress').show();
+                        setTimeout(function() {
+                            $('.progress').hide();
+                            $('#startListeningBtn').show();
+                        }, 3000);
+                    }
+                });
+            });
+            $('#startListeningBtn').on('click', function() {
+                $('#status').text('Listening for commands...');
+                $.post('/start_listening', function(data) {
+                    $('#status').text(data.message);
+                }).done(function(response) {
+                    $('#status').html(response.message);
+                    if (response.command) {
+                        $('#status').append('<br><strong>Command:</strong> ' + response.command);
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>
